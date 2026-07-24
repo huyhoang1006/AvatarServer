@@ -1,0 +1,25 @@
+import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { BullModule } from '@nestjs/bullmq';
+
+import { EventsController } from './events.controller';
+import { EventsService } from './events.service';
+import { EventsProcessor, EVENT_QUEUE } from './events.processor';
+import { Event } from '../../database/entities/event.entity';
+import { EventLog } from '../../database/entities/event-log.entity';
+import { Leaderboard } from '../../database/entities/leaderboard.entity';
+import { SessionModule } from '../session/session.module';
+import { AuthModule } from '../auth/auth.module';
+
+@Module({
+  imports: [
+    TypeOrmModule.forFeature([Event, EventLog, Leaderboard]),
+    BullModule.registerQueue({ name: EVENT_QUEUE }),
+    SessionModule, // for REDIS_CLIENT provider
+    AuthModule,
+  ],
+  controllers: [EventsController],
+  providers: [EventsService, EventsProcessor],
+  exports: [EventsService],
+})
+export class EventsModule {}
