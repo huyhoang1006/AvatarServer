@@ -36,6 +36,12 @@ export class User {
   @Column({ default: true })
   active: boolean;
 
+  // Phong admin bằng tay:  UPDATE users SET is_admin = true WHERE id = 1;
+  // AdminGuard đọc cột này từ DB mỗi request chứ không nhét vào JWT — thu quyền
+  // là mất quyền ngay, không phải đợi token cũ hết hạn.
+  @Column({ name: 'is_admin', default: false })
+  isAdmin: boolean;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

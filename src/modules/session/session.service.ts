@@ -7,6 +7,9 @@ import { REDIS_CLIENT } from './redis.provider';
 const SESSION_KEY = (uid: number) => `session:${uid}`;
 const ONLINE_SET = 'session:online';
 
+/** Đệm thêm sau grace period để job flush kịp đọc state trước khi key hết hạn. */
+const FLUSH_BUFFER_SECONDS = 60;
+
 /**
  * SessionService stores per-user mid-game state in Redis with a TTL.
  *
@@ -43,6 +46,20 @@ export class SessionService {
     return state;
   }
 
+  /**
+   * Người chơi quay lại trong grace period: giữ nguyên state đang dở, chỉ gia hạn
+   * TTL về mức bình thường. Nạp lại từ Postgres ở đây sẽ xoá mất phần chơi từ lần
+   * save cuối tới lúc mất kết nối — đúng thứ mà grace period sinh ra để cứu.
+   */
+  async resume(userId: number): Promise<SessionState | null> {
+    const state = await this.get(userId);
+    if (!state) return null;
+    await this.redis.expire(SESSION_KEY(userId), this.ttl);
+    await this.redis.sadd(ONLINE_SET, String(userId));
+    this.logger.debug(`User ${userId} quay lai trong grace period, giu nguyen state`);
+    return state;
+  }
+
   async get(userId: number): Promise<SessionState | null> {
     const raw = await this.redis.get(SESSION_KEY(userId));
     if (!raw) return null;
@@ -65,11 +82,18 @@ export class SessionService {
    * Called when the WS socket disconnects. Resets TTL to grace period.
    * If user reconnects before grace expires, session is still intact.
    */
+  /** Grace period (giây) — gateway dùng để hẹn giờ job flush. */
+  get gracePeriodSeconds(): number {
+    return this.grace;
+  }
+
   async disconnect(userId: number) {
     await this.redis.srem(ONLINE_SET, String(userId));
     const exists = await this.redis.exists(SESSION_KEY(userId));
     if (exists) {
-      await this.redis.expire(SESSION_KEY(userId), this.grace);
+      // TTL dài hơn grace một khoảng đệm: job flush chạy đúng mốc grace, key phải
+      // còn sống lúc đó thì mới lưu được state cuối xuống Postgres.
+      await this.redis.expire(SESSION_KEY(userId), this.grace + FLUSH_BUFFER_SECONDS);
       this.logger.debug(`User ${userId} disconnected, grace=${this.grace}s`);
     }
   }

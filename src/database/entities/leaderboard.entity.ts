@@ -27,7 +27,7 @@ export class Leaderboard {
   @Column({ default: 0 })
   score: number;
 
-  @Column({ nullable: true, length: 64 })
+  @Column({ type: 'varchar', length: 64, nullable: true })
   username: string | null; // denormalized snapshot
 
   @Column({ name: 'snapshot_at', type: 'timestamptz' })

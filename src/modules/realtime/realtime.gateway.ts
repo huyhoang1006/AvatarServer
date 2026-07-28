@@ -9,6 +9,7 @@ import {
   WebSocketServer,
 } from '@nestjs/websockets';
 import { Logger, OnModuleInit } from '@nestjs/common';
+import type { IncomingMessage } from 'http';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
@@ -20,12 +21,18 @@ import { EventsService } from '../events/events.service';
 import { UsersService } from '../users/users.service';
 import { REDIS_CLIENT } from '../session/redis.provider';
 import { Inject } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import type { SessionState } from '../../common/types/jwt-payload';
+import { stripTransient } from './session-state.util';
+import { SESSION_QUEUE, SessionFlushJob, flushJobId } from './session-flush.processor';
 
 interface AuthedClient extends WebSocket {
+  /** Upgrade request, stashed in handleConnection — `ws` doesn't keep it on the socket. */
+  request?: IncomingMessage;
   data: {
-    userId: number;
-    username: string;
+    userId?: number;
+    username?: string;
   };
 }
 
@@ -61,6 +68,7 @@ export class RealtimeGateway
     private readonly events: EventsService,
     private readonly users: UsersService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    @InjectQueue(SESSION_QUEUE) private readonly sessionQueue: Queue<SessionFlushJob>,
   ) {}
 
   async onModuleInit() {
@@ -83,20 +91,32 @@ export class RealtimeGateway
     this.logger.log('WebSocket gateway initialized');
   }
 
-  handleConnection(client: AuthedClient) {
+  handleConnection(client: AuthedClient, req: IncomingMessage) {
     // Auth happens on the first message via WsJwtGuard (more forgiving than on connect,
-    // because Godot clients may set headers late). Alternatively gate here:
-    // const guard = new WsJwtGuard(this.jwt, this.cfg);
-    // guard.canActivate({ switchToWs: () => ({ getClient: () => client }) } as any);
+    // because Godot clients may set headers late), so keep the upgrade request around —
+    // that's where the ?token= query string and Authorization header live.
+    client.request = req;
+    client.data = {};
     this.logger.debug(`+ connection (pending auth)`);
   }
 
   async handleDisconnect(client: AuthedClient) {
     const uid = client.data?.userId;
-    if (uid) {
-      await this.sessions.disconnect(uid);
-      this.logger.debug(`- user ${uid} disconnected`);
-    }
+    if (!uid) return;
+
+    await this.sessions.disconnect(uid);
+
+    // Hẹn giờ lưu nốt: quá grace period mà không quay lại thì job này ghi state
+    // cuối xuống Postgres rồi dọn Redis. Vào lại trước hạn thì onAuth huỷ nó.
+    const graceMs = this.sessions.gracePeriodSeconds * 1000;
+    await this.sessionQueue.remove(flushJobId(uid));
+    await this.sessionQueue.add(
+      flushJobId(uid),
+      { userId: uid },
+      { jobId: flushJobId(uid), delay: graceMs, removeOnComplete: true, removeOnFail: 100 },
+    );
+
+    this.logger.debug(`- user ${uid} disconnected, hen flush sau ${graceMs / 1000}s`);
   }
 
   @SubscribeMessage('auth')
@@ -115,15 +135,28 @@ export class RealtimeGateway
       return { type: 'error', message: e?.message ?? 'unauthorized' };
     }
 
-    const { userId, username } = client.data;
+    // Set by the guard above; if either is missing the guard would have thrown.
+    const userId = client.data.userId!;
+    const username = client.data.username ?? '';
 
-    // Load profile from DB into Redis session
-    const profile = await this.users.getProfile(userId);
-    const state = await this.sessions.start(userId, username, {
-      data: profile.data as any,
-      scene: (profile.data as any)?.scene,
-      position: (profile.data as any)?.position,
-    });
+    // Quay lại kịp trong grace period — huỷ job flush đang chờ, nếu không nó sẽ
+    // xoá mất session ngay giữa lúc đang chơi.
+    await this.sessionQueue.remove(flushJobId(userId));
+
+    // Còn session trong Redis nghĩa là vừa rớt mạng và quay lại kịp — giữ nguyên
+    // state đang dở. Chỉ khi không còn gì mới nạp lại từ Postgres.
+    //
+    // Blob lưu được spread phẳng vào session; bọc nó dưới key `data` sẽ khiến mỗi
+    // vòng save→load lồng thêm một tầng.
+    let state = await this.sessions.resume(userId);
+    if (!state) {
+      const profile = await this.users.getProfile(userId);
+      state = await this.sessions.start(
+        userId,
+        username,
+        stripTransient(profile.data as Record<string, any> | null),
+      );
+    }
 
     return { type: 'welcome', userId, username, ttl: state };
   }
@@ -143,13 +176,9 @@ export class RealtimeGateway
     if (!client.data?.userId) return { type: 'error', message: 'not_authenticated' };
     const userId = client.data.userId;
     const ok = await this.sessions.saveToDb(userId, async (state) => {
-      // Persist volatile session data into user_profiles.data JSON column
-      await this.users.patchProfile(userId, {
-        data: {
-          ...((await this.users.getProfile(userId))?.data ?? {}),
-          ...state,
-        },
-      });
+      // The session already holds everything that was loaded at auth time, so this is a
+      // straight replace — merging the stored blob back in would resurrect stale keys.
+      await this.users.patchProfile(userId, { data: stripTransient(state) });
     });
     return ok ? { type: 'saved', at: Date.now() } : { type: 'error', message: 'no_active_session' };
   }

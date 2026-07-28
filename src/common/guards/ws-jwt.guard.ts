@@ -20,7 +20,9 @@ export class WsJwtGuard implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     const client = context.switchToWs().getClient();
-    const req = client._request as IncomingMessage | undefined;
+    // The `ws` package does not expose the upgrade request on the socket, so the
+    // gateway stashes it in handleConnection().
+    const req = client.request as IncomingMessage | undefined;
     if (!req) throw new WsException('Missing request');
 
     let token: string | undefined;

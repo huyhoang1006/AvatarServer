@@ -32,11 +32,35 @@ npm install
 npm run start:dev
 ```
 
-Lần đầu khởi động, TypeORM `synchronize=true` sẽ tự tạo schema. Khi lên prod, set `DB_SYNCHRONIZE=false` và dùng migrations:
+Schema tạo bằng migration (`DB_SYNCHRONIZE=false`):
 
 ```bash
 npm run db:migrate
 ```
+
+Với `docker compose up -d` thì service `migrate` tự chạy bước này trước khi `app` khởi động.
+
+Các lệnh khác:
+
+```bash
+npm run db:generate -- src/database/migrations/TenMigration   # sinh migration từ entity
+npm run db:revert                                             # lùi 1 migration
+npm run db:reset                                              # xoá sạch DB + Redis rồi migrate lại (chỉ dev)
+```
+
+`db:reset` dọn cả Redis là có lý do: chỉ xoá Postgres thì id sự kiện bắt đầu lại
+từ 1 trong khi key `leaderboard:1` cũ vẫn còn, và sự kiện mới thừa hưởng điểm cũ.
+
+## 🧪 Test
+
+```bash
+npm run test:api
+```
+
+Test tích hợp thật — cần Postgres, Redis và server đang chạy. Đặt
+`THROTTLE_DISABLED=true` trong `.env` trước khi chạy, vì bộ test tạo hàng chục
+tài khoản một lượt nên sẽ đâm vào hạn mức đăng ký. Biến này bị bỏ qua khi
+`NODE_ENV=production`.
 
 ## 📡 HTTP API
 
@@ -101,6 +125,14 @@ curl -X POST http://localhost:3000/inventory \
 ```
 
 ### Events
+
+Các endpoint tạo/bật/tắt event cần tài khoản có `users.is_admin = true`:
+
+```bash
+npm run admin:grant -- alice     # phong admin
+npm run admin:list               # xem danh sách
+npm run admin:revoke -- alice    # thu quyền
+```
 
 ```bash
 # Tạo event (admin)
@@ -204,14 +236,29 @@ Mọi message là JSON. Một số message có cả **request-reply** (kết qu�
 
 ### Client → Server
 
-| type | payload | mục đích |
+⚠️ Client gửi lên **bắt buộc** theo dạng `{ "event": ..., "data": {...} }` — đây là format `WsAdapter`
+của NestJS route message. Gửi sai key (ví dụ `{"type": "auth"}`) thì message bị **bỏ qua im lặng**,
+server không trả lỗi gì cả.
+
+| event | data | mục đích |
 |---|---|---|
 | `auth` | `{ token }` | Xác thực, khởi tạo session |
 | `patch` | `{ state: { scene, position, farmData } }` | Cập nhật state đang chơi (Redis only) |
 | `save` | `{}` | Flush state từ Redis → Postgres |
 | `ping` | `{ t }` | Đo latency |
 
+```json
+{"event": "auth",  "data": {"token": "eyJ..."}}
+{"event": "patch", "data": {"state": {"scene": "farm_map", "position": {"x": 12, "y": 34}}}}
+{"event": "save",  "data": {}}
+```
+
+Lưu ý: `?token=` trên URL chỉ để guard đọc được JWT — **vẫn phải gửi `auth`** thì server mới nạp
+profile và trả `welcome`.
+
 ### Server → Client
+
+Chiều này **không** bọc `event`/`data` — server gửi thẳng object trả về, nên client cứ đọc `type`:
 
 | type | payload | khi nào |
 |---|---|---|
@@ -283,13 +330,22 @@ Xem `.env.example`. Quan trọng nhất:
 [Godot] connect WS ──> auth (JWT) ──> load profile từ Postgres → cache Redis (TTL 30m)
                                                   ↓
 [Godot] patch state ─────────────────────> update Redis (state tạm)
-[Godot] action quan trọng ───────────────> ghi ngay vào Postgres (transaction)
+[Godot] save ────────────────────────────> flush Redis → Postgres
                                                   ↓
-[Godot] disconnect ───────────────────────> Redis vẫn giữ, TTL đổi → grace 5 phút
+[Godot] disconnect ───────────────────────> Redis vẫn giữ (grace 5 phút)
+                                             + hẹn job flush sau đúng 5 phút
                                                   ↓
-[Godot] reconnect <5 phút ───────────────> state y nguyên, tiếp tục chơi
-[Godot] quá 5 phút không quay lại ───────> auto-save state cuối → xóa Redis
+[Godot] reconnect <5 phút ───────────────> huỷ job, state y nguyên, chơi tiếp
+[Godot] quá 5 phút không quay lại ───────> job chạy: lưu state cuối → xoá Redis
 ```
+
+Lưới an toàn ở dòng cuối là thứ cứu người chơi bị mất điện giữa chừng: state đã
+`patch` nhưng chưa kịp `save` vẫn xuống được Postgres. Job nằm ở
+`realtime/session-flush.processor.ts`, hàng đợi BullMQ tên `session`.
+
+Client **là bản gốc** của tiến trình: game lưu xuống `user://save.json` và chơi
+được hoàn toàn offline. Server chỉ là bản sao lưu — khi đồng bộ, máy nào đã có
+save thì bản local ghi đè lên bản server.
 
 ## 📦 Production
 

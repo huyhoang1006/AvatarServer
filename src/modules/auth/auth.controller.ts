@@ -16,6 +16,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
+import { Throttle } from '@nestjs/throttler';
 
 import { AuthService } from './auth.service';
 import { DeviceCodeService } from './services/device-code.service';
@@ -42,13 +43,18 @@ export class AuthController {
 
   // ============== LOCAL ==============
 
+  // Hạn mức tính theo IP, mà quán net / ký túc xá thì cả phòng chung một IP —
+  // để chặt quá là chặn nhầm người chơi thật. 10/phút vẫn đủ chặn bot.
   @Post('register')
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
   @HttpCode(HttpStatus.CREATED)
   register(@Body() dto: RegisterDto) {
     return this.auth.register(dto);
   }
 
+  // Cũng vì lý do IP dùng chung ở trên. 20 lần/phút vẫn quá chậm để dò mật khẩu.
   @Post('login')
+  @Throttle({ default: { ttl: 60_000, limit: 20 } })
   @HttpCode(HttpStatus.OK)
   login(@Body() dto: LoginDto) {
     return this.auth.login(dto);
@@ -93,7 +99,9 @@ export class AuthController {
     return code;
   }
 
+  // Client poll 2s/lần nên hạn mức phải rộng, nhưng vẫn đủ chặn việc dò mò device code.
   @Post('device/poll')
+  @Throttle({ default: { ttl: 60_000, limit: 40 } })
   @HttpCode(HttpStatus.OK)
   async pollDevice(@Body() dto: PollDeviceDto) {
     const entry = await this.deviceCodes.get(dto.deviceCode);
@@ -104,7 +112,10 @@ export class AuthController {
     if (entry.status === 'pending') {
       return { status: 'pending' as const };
     }
-    // completed
+    // Đã completed — code chỉ dùng được đúng một lần. Không xoá thì nó còn sống hết
+    // 10 phút TTL và ai biết code cũng poll lại lấy được token.
+    await this.deviceCodes.delete(dto.deviceCode);
+
     if (entry.error) {
       return { status: 'expired' as const };
     }

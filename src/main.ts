@@ -1,3 +1,8 @@
+// Must come before any other import: AuthModule decides at import time whether to register
+// the Google/Facebook strategies, and RealtimeGateway reads WS_PATH in its decorator. Both
+// run before ConfigModule loads .env, so the file has to be in process.env already.
+import 'dotenv/config';
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';

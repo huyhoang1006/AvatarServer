@@ -9,11 +9,17 @@
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit --incremental false",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "db:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts",
     "db:migrate": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
     "db:revert": "typeorm-ts-node-commonjs migration:revert -d src/database/data-source.ts",
-    "db:seed": "ts-node src/database/seeds/seed.ts"
+    "db:migrate:prod": "node ./node_modules/typeorm/cli.js migration:run -d dist/database/data-source.js",
+    "db:reset": "ts-node -T src/database/scripts/reset.ts",
+    "admin:grant": "ts-node -T src/database/scripts/grant-admin.ts grant",
+    "admin:revoke": "ts-node -T src/database/scripts/grant-admin.ts revoke",
+    "admin:list": "ts-node -T src/database/scripts/grant-admin.ts list",
+    "test:api": "node test/api.test.js"
   },
   "dependencies": {
     "@nestjs/bullmq": "^11.0.0",
@@ -24,6 +30,7 @@
     "@nestjs/passport": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/platform-ws": "^11.0.0",
+    "@nestjs/throttler": "^6.5.0",
     "@nestjs/typeorm": "^11.0.0",
     "@nestjs/websockets": "^11.0.0",
     "bcrypt": "^5.1.1",

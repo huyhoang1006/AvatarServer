@@ -25,6 +25,7 @@ var current_user: Dictionary = {}
 
 var ws := WebSocketPeer.new()
 var _authenticated := false
+var _ws_was_open := false
 
 var _auto_save_timer: Timer
 var _reconnect_timer: Timer
@@ -99,9 +100,15 @@ func logout() -> void:
 
 func connect_ws() -> void:
     if token.is_empty(): return
+    _ws_was_open = false
     var err := ws.connect_to_url(WS_HOST + "?token=" + token)
     if err != OK:
         push_error("WS connect error: %d" % err)
+
+## Nest routes WS messages on `event` and passes `data` to the handler, so every
+## client→server frame must be shaped {"event": ..., "data": {...}}.
+func _send(event: String, data: Dictionary = {}) -> void:
+    ws.send_text(JSON.stringify({"event": event, "data": data}))
 
 func _ready() -> void:
     _auto_save_timer = Timer.new()
@@ -124,10 +131,16 @@ func _process(_delta: float) -> void:
     ws.poll()
     var state := ws.get_ready_state()
     if state == WebSocketPeer.STATE_OPEN:
+        if not _ws_was_open:
+            # The ?token= query string alone does not start a session — the server
+            # only loads the profile and replies "welcome" once we send `auth`.
+            _ws_was_open = true
+            _send("auth", {"token": token})
         while ws.get_available_packet_count() > 0:
             var pkt := ws.get_packet().get_string_from_utf8()
             _handle_packet(pkt)
-    elif state == WebSocketPeer.STATE_CLOSED and _authenticated:
+    elif state == WebSocketPeer.STATE_CLOSED and _ws_was_open:
+        _ws_was_open = false
         _authenticated = false
         _reconnect_timer.start()
 
@@ -145,11 +158,11 @@ func _handle_packet(raw: String) -> void:
 
 func patch_state(partial: Dictionary) -> void:
     if not _authenticated: return
-    ws.send_text(JSON.stringify({"type": "patch", "state": partial}))
+    _send("patch", {"state": partial})
 
 func save_now() -> void:
     if not _authenticated: return
-    ws.send_text(JSON.stringify({"type": "save"}))
+    _send("save")
 
 func _on_auto_save() -> void:
     if _authenticated:

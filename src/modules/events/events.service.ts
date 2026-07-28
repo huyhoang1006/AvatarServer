@@ -15,6 +15,10 @@ import { REDIS_CLIENT } from '../session/redis.provider';
 const LB_KEY = (eventId: number) => `leaderboard:${eventId}`;
 const PUB_CHANNEL = 'events:broadcast';
 
+// Trần mặc định, ghi đè được cho từng sự kiện qua config.maxActionsPerMinute / config.maxScore
+const DEFAULT_MAX_ACTIONS_PER_MINUTE = 60;
+const DEFAULT_MAX_EVENT_SCORE = 100_000;
+
 @Injectable()
 export class EventsService implements OnModuleInit {
   private readonly logger = new Logger(EventsService.name);
@@ -50,8 +54,15 @@ export class EventsService implements OnModuleInit {
       status: 'scheduled',
     });
     const saved = await this.events.save(e);
-    await this.scheduleEvent(saved);
-    return saved;
+    // The row is already committed at this point, so a queue failure must not turn into
+    // a 500 — that would report "failed" for an event the caller can see in GET /events.
+    try {
+      await this.scheduleEvent(saved);
+    } catch (err) {
+      this.logger.error(`Không hẹn giờ được event ${saved.code}: ${err}`);
+      return { ...saved, scheduled: false };
+    }
+    return { ...saved, scheduled: true };
   }
 
   /**
@@ -63,22 +74,26 @@ export class EventsService implements OnModuleInit {
     const startMs = new Date(e.startAt).getTime();
     const endMs = new Date(e.endAt).getTime();
 
-    // Clean up old jobs for this event (by jobId convention) before re-queueing
-    await this.queue.remove(`event_start:${e.id}`);
-    await this.queue.remove(`event_end:${e.id}`);
+    // BullMQ rejects a jobId containing ':' ("Custom Id cannot contain :"), so these
+    // ids use '-'. Keep them stable — re-scheduling relies on removing the old ones.
+    const startJobId = `event_start-${e.id}`;
+    const endJobId = `event_end-${e.id}`;
+
+    await this.queue.remove(startJobId);
+    await this.queue.remove(endJobId);
 
     if (startMs > now) {
       await this.queue.add(
-        `event_start:${e.id}`,
+        startJobId,
         { type: 'event_start', eventId: e.id, code: e.code, name: e.name, config: e.config },
-        { jobId: `event_start:${e.id}`, delay: startMs - now, removeOnComplete: true },
+        { jobId: startJobId, delay: startMs - now, removeOnComplete: true },
       );
     }
     if (endMs > now) {
       await this.queue.add(
-        `event_end:${e.id}`,
+        endJobId,
         { type: 'event_end', eventId: e.id, code: e.code },
-        { jobId: `event_end:${e.id}`, delay: endMs - now, removeOnComplete: true },
+        { jobId: endJobId, delay: endMs - now, removeOnComplete: true },
       );
     }
   }
@@ -106,6 +121,13 @@ export class EventsService implements OnModuleInit {
     );
     // Snapshot leaderboard to Postgres when event ends
     await this.snapshotLeaderboard(e.id);
+
+    // Dọn key Redis sau khi đã snapshot. Không dọn thì một sự kiện sau trùng id
+    // (hay gặp nhất là sau khi wipe DB lúc dev) sẽ thừa hưởng điểm cũ.
+    await this.redis.del(LB_KEY(e.id));
+    const rateKeys = await this.redis.keys(`event:rate:${e.id}:*`);
+    if (rateKeys.length) await this.redis.del(...rateKeys);
+
     return e;
   }
 
@@ -121,8 +143,27 @@ export class EventsService implements OnModuleInit {
       return { ok: false, reason: 'event_not_active' };
     }
 
-    // Compute score from config.scoreFn or default to 1 point per call
+    // Game chơi offline là chính nên server không có cách nào thẩm định "tôi vừa
+    // thu hoạch" là thật hay bịa. Thay vì giả vờ xác thực, đặt hai cái trần cứng:
+    // số lần ghi điểm mỗi phút, và tổng điểm tối đa cho cả sự kiện. Người chơi
+    // thật không bao giờ chạm tới, còn script cày thì bị chặn ở đây.
+    const perMinute = Number(ev.config?.maxActionsPerMinute ?? DEFAULT_MAX_ACTIONS_PER_MINUTE);
+    const rateKey = `event:rate:${ev.id}:${userId}`;
+    const used = await this.redis.incr(rateKey);
+    if (used === 1) {
+      await this.redis.expire(rateKey, 60);
+    }
+    if (used > perMinute) {
+      return { ok: false, reason: 'rate_limited' };
+    }
+
     const points = (ev.config?.points as number) ?? 1;
+
+    const maxScore = Number(ev.config?.maxScore ?? DEFAULT_MAX_EVENT_SCORE);
+    const current = Number((await this.redis.zscore(LB_KEY(ev.id), String(userId))) ?? 0);
+    if (current + points > maxScore) {
+      return { ok: false, reason: 'score_cap_reached', score: current };
+    }
 
     await this.logs.save(
       this.logs.create({

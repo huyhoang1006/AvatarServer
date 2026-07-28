@@ -1,4 +1,4 @@
-import { ExecutionContext, Injectable } from '@nestjs/common';
+import { ExecutionContext, Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 
 /**
@@ -7,6 +7,17 @@ import { AuthGuard } from '@nestjs/passport';
  */
 @Injectable()
 export class GoogleAuthGuard extends AuthGuard('google') {
+  canActivate(context: ExecutionContext) {
+    // AuthModule chỉ đăng ký strategy khi có GOOGLE_CLIENT_ID/SECRET. Thiếu thì
+    // passport ném "Unknown authentication strategy" -> 500 rất khó hiểu.
+    if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+      throw new ServiceUnavailableException(
+        'Đăng nhập Google chưa được cấu hình trên máy chủ',
+      );
+    }
+    return super.canActivate(context);
+  }
+
   getAuthenticateOptions(context: ExecutionContext) {
     const req = context.switchToHttp().getRequest();
     return {

@@ -23,7 +23,9 @@ export const AppDataSource = new DataSource({
   password: process.env.DB_PASSWORD || 'avatar_pass',
   database: process.env.DB_NAME || 'avatar_farm',
   entities: [User, UserProfile, Inventory, Event, EventLog, Leaderboard, AuthIdentity],
-  migrations: ['src/database/migrations/*.ts'],
+  // Bám theo vị trí file thay vì đường dẫn từ thư mục gốc: chạy bằng ts-node thì
+  // khớp src/**/*.ts, chạy bản build trong container thì khớp dist/**/*.js.
+  migrations: [__dirname + '/migrations/*.{ts,js}'],
   synchronize: false,
   logging: false,
 });

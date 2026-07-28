@@ -11,6 +11,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { FacebookStrategy } from './strategies/facebook.strategy';
 import { DeviceCodeService } from './services/device-code.service';
+import { AdminGuard } from './guards/admin.guard';
 
 import { User } from '../../database/entities/user.entity';
 import { UserProfile } from '../../database/entities/user-profile.entity';
@@ -45,7 +46,7 @@ const oauthProviders = [
     SessionModule, // gives us REDIS_CLIENT for DeviceCodeService
   ],
   controllers: [AuthController, OAuthController],
-  providers: [AuthService, JwtStrategy, DeviceCodeService, ...oauthProviders],
-  exports: [AuthService, JwtModule],
+  providers: [AuthService, JwtStrategy, DeviceCodeService, AdminGuard, ...oauthProviders],
+  exports: [AuthService, JwtModule, AdminGuard],
 })
 export class AuthModule {}
